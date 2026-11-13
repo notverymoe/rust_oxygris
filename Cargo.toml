@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/memory",
+]
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all                            = { level = "warn", priority = -1 }
+pedantic                       = { level = "warn", priority = -1 }
+alloc_instead_of_core          = "warn"
+as_underscore                  = "warn"
+clone_on_ref_ptr               = "warn"
+create_dir                     = "warn"
+empty_structs_with_brackets    = "warn"
+error_impl_error               = "warn"
+exit                           = "warn"
+filetype_is_file               = "warn"
+fn_to_numeric_cast_any         = "warn"
+format_push_string             = "warn"
+missing_const_for_fn           = "warn"
+mixed_read_write_in_expression = "warn"
+panic_in_result_fn             = "warn"
+partial_pub_fields             = "warn"
+str_to_string                  = "warn"
+implicit_clone                 = "warn"
+tests_outside_test_module      = "warn"
+undocumented_unsafe_blocks     = "warn"
+unnecessary_safety_comment     = "warn"
+unnecessary_safety_doc         = "warn"
+unseparated_literal_suffix     = "warn"
+
+missing_errors_doc             = "warn"
+missing_panics_doc             = "warn" 
+
+cast_lossless                  = "allow"
+cast_possible_truncation       = "allow"
+cast_possible_wrap             = "allow"
+cast_precision_loss            = "allow"
+cast_sign_loss                 = "allow"
+missing_docs_in_private_items  = "allow"
+module_name_repetitions        = "allow"
+needless_pass_by_value         = "allow"
+shadow_unrelated               = "allow"     
+similar_names                  = "allow"  
+unwrap_in_result               = "allow"
+many_single_char_names         = "allow"
+match_same_arms                = "allow"
+collapsible_else_if            = "allow"
+too_many_arguments             = "allow"
+too_many_lines                 = "allow"
+wildcard_imports               = "allow"
+type_complexity                = "allow"
+collapsible_if                 = "allow"
+std_instead_of_core            = "allow"
+collapsible_match              = "allow"
+if_then_some_else_none         = "allow"
+
+[profile.release]
+opt-level = 3
+# lto = "fat"
+# codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
