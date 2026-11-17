@@ -5,20 +5,19 @@
 //!
 //! [`BitMap64`] is a `u64` where bit `i` stands for entry `i`. The page
 //! keeps one per chunk for occupancy, marks and dirty slots, and one per
-//! page summarizing each of those across chunks, so the map's width is
-//! also the number of slots in a chunk and of chunks in a page.
+//! page summarizing each of those across chunks.
 //!
 //! Beyond the bitwise operators, the map supports lowest-first search
 //! through [`BitMap64::trailing_ones`] and [`BitMap64::trailing_zeros`],
 //! walking a map as alternating runs through [`BitMap64::consume_zeros`]
 //! and [`BitMap64::consume_ones`], and folding a slice of maps into one
-//! bit per map through the `summarize_*` constructors.
+//! bit per map through the `summarize_*` constructors. Long bit arrays,
+//! such as the dirty map of a chunk, are slices of maps indexed through
+//! [`BitMap64::INDEX_BITS`] and [`BitMap64::INDEX_MASK`].
 
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not};
 
-/// A 64-bit bitmap where bit `i` addresses entry `i`. Used for per-chunk
-/// slot state and per-page chunk summaries, so its width matches
-/// `PAGE_ENTRY_COUNT`.
+/// A 64-bit bitmap where bit `i` addresses entry `i`.
 ///
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -68,6 +67,20 @@ impl BitXorAssign for BitMap64 {
     fn bitxor_assign(&mut self, rhs: Self) {
         self.0 ^= rhs.0;
     }
+}
+
+impl BitMap64 {
+
+    /// The number of bits in the map.
+    pub const BITS: u32 = u64::BITS;
+
+    /// Log2 of `BITS`, for splitting a flat bit index into a map index
+    /// and a bit index within that map.
+    pub const INDEX_BITS: u32 = Self::BITS.ilog2();
+
+    /// Mask selecting the bit index within one map from a flat bit index.
+    pub const INDEX_MASK: u32 = Self::BITS - 1;
+    
 }
 
 impl BitMap64 {

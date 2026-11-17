@@ -10,8 +10,7 @@
 //! the largest.
 //! 
 //! **Disclosure** Unless otherwise stated on the test, these tests
-//!     were written by an LLM and were not thoroughly reviewed by a
-//!     human.
+//!     were written by an LLM and were not reviewed by a human.
 
 #![allow(
     clippy::missing_panics_doc,
@@ -21,10 +20,10 @@
 use alloc::{collections::{BTreeMap, BTreeSet}, vec::Vec};
 
 use super::*;
-use crate::heap::class_for;
+use crate::heap::util::{CLASS_COUNT, class_for_size};
 
 /// Slots per page.
-const PAGE_SLOTS: usize = PAGE_ENTRY_COUNT_SZ * PAGE_ENTRY_COUNT_SZ;
+const PAGE_SLOTS: usize = HeapLoc::ENTRY_COUNT_SZ * HeapLoc::ENTRY_COUNT_SZ;
 
 impl Page {
     /// Asserts every cross-structure invariant of the page: the counters
@@ -43,7 +42,7 @@ impl Page {
 
         // // Check Basics // //
 
-        assert!(self.chunk_capacity <= PAGE_ENTRY_COUNT, "chunk_capacity exceeds the page");
+        assert!(self.chunk_capacity <= HeapLoc::ENTRY_COUNT, "chunk_capacity exceeds the page");
         assert_eq!(
             self.slot_hw as usize * Handle::BYTES, self.slot_size as usize,
             "slot_hw disagrees with slot_size",
@@ -52,7 +51,7 @@ impl Page {
         for i in 0..chunk_capacity_sz {
             assert_eq!(
                 self.c_data[i].as_deref().map(<[u8]>::len),
-                Some(self.slot_size as usize * PAGE_ENTRY_COUNT_SZ),
+                Some(self.slot_size as usize * HeapLoc::ENTRY_COUNT_SZ),
                 "c_data missing or wrongly sized at committed chunk {i}",
             );
             assert_eq!(
@@ -62,7 +61,7 @@ impl Page {
             );
         }
 
-        for i in chunk_capacity_sz..PAGE_ENTRY_COUNT_SZ {
+        for i in chunk_capacity_sz..HeapLoc::ENTRY_COUNT_SZ {
             assert!(self.c_data[i].is_none(),  "c_data set in uncommitted chunk {i}");
             assert!(self.h_dirty[i].is_none(), "h_dirty set in uncommitted chunk {i}");
             assert!(self.c_occupied[i].none(), "c_occupied set in uncommitted chunk {i}");
@@ -96,7 +95,7 @@ impl Page {
 
         // // Check Chunk Summaries // //
 
-        for chunk in 0..PAGE_ENTRY_COUNT_SZ {
+        for chunk in 0..HeapLoc::ENTRY_COUNT_SZ {
             assert!(
                 (self.c_dirty[chunk] & !self.c_occupied[chunk]).none(),
                 "c_dirty set on unoccupied slot in chunk {chunk}",
@@ -124,10 +123,10 @@ impl Page {
     ///
     fn summarize_h_dirty(&self, h_dirty: &[BitMap64]) -> BitMap64 {
         let mut summary = BitMap64::NONE;
-        for slot in 0..PAGE_ENTRY_COUNT {
+        for slot in 0..HeapLoc::ENTRY_COUNT {
             let base = self.slot_hw_base(slot);
             let dirty = (base..base + self.slot_hw).any(|hw| {
-                h_dirty[(hw >> PAGE_ENTRY_BITS) as usize].get(hw & PAGE_ENTRY_MASK)
+                h_dirty[(hw >> BitMap64::INDEX_BITS) as usize].get(hw & BitMap64::INDEX_MASK)
             });
             summary.set(slot, dirty);
         }
@@ -156,13 +155,13 @@ fn handle(n: u64) -> Handle {
 /// A kind-0 word that is not all zero: null, but not `NONE`.
 const KIND_ZERO_WORD: Handle = Handle(0x0000_FFFF_FFFF_FFFF);
 
-const fn loc(chunk: u32, slot: u32) -> PageLocation {
-    PageLocation { chunk, slot }
+const fn loc(chunk: u32, slot: u32) -> PageLoc {
+    PageLoc::new(chunk, slot)
 }
 
 /// Allocates `count` empty slots under `gc`, checking invariants after
 /// each, and returns their locations in order.
-fn alloc_n(p: &mut Page, count: usize, gc: GcPhaseInfo) -> Vec<PageLocation> {
+fn alloc_n(p: &mut Page, count: usize, gc: GcPhaseInfo) -> Vec<PageLoc> {
     (0..count).map(|_| {
         let info = p.alloc(None, HandleMap::Scan(0), gc).expect("page has free slots");
         p.check_invariants();
@@ -172,7 +171,7 @@ fn alloc_n(p: &mut Page, count: usize, gc: GcPhaseInfo) -> Vec<PageLocation> {
 
 /// Marks every location live under `gc`, asserting each was newly
 /// marked, and checks invariants once at the end.
-fn mark_all(p: &mut Page, locs: &[PageLocation], gc: GcPhaseInfo) {
+fn mark_all(p: &mut Page, locs: &[PageLoc], gc: GcPhaseInfo) {
     for &l in locs {
         let (marked, _) = p.mark_live(l, gc);
         assert!(marked, "{l:?} was already marked");
@@ -215,7 +214,7 @@ fn page_with_stale_slot() -> Page {
 
     // A marking that reached nothing, so the sweep frees slot 0
     let swept = p.sweep_to(1);
-    assert_eq!(swept, Some(SweepInfo { freed: 1, became_not_full: false, became_empty: true }));
+    assert_eq!(swept, Some(PageSweepInfo { freed: 1, became_not_full: false, became_empty: true }));
     p.check_invariants();
 
     // Freed slots keep their bytes, so the stale data is still there
@@ -232,17 +231,25 @@ mod classes {
     /// 64 KiB, and every size is whole handle-words.
     #[test]
     fn table_shape() {
-        assert_eq!(class_bytes(0), 16);
-        assert_eq!(class_bytes(15), 256);
-        assert_eq!(class_bytes(16), 512);
-        assert_eq!(class_bytes(CLASS_COUNT - 1), 1 << 16);
+        assert_eq!(size_of_class(0),  Some( 16));
+        assert_eq!(size_of_class(15), Some(256));
+        assert_eq!(size_of_class(16), Some(512));
+        assert_eq!(size_of_class(CLASS_COUNT - 1), Some(1 << 16));
         for class in 1..CLASS_COUNT {
             if class < 16 {
-                assert_eq!(class_bytes(class) - class_bytes(class - 1), 16, "class {class}");
+                assert_eq!(
+                    size_of_class(class).unwrap() - size_of_class(class - 1).unwrap(), 
+                    16, 
+                    "class {class}"
+                );
             } else {
-                assert_eq!(class_bytes(class), 2 * class_bytes(class - 1), "class {class}");
+                assert_eq!(
+                    size_of_class(class).unwrap(), 
+                    2 * size_of_class(class - 1).unwrap(), 
+                    "class {class}"
+                );
             }
-            assert!(class_bytes(class).is_multiple_of(Handle::BYTES as u32));
+            assert!(size_of_class(class).unwrap().is_multiple_of(Handle::BYTES as u32));
         }
     }
 
@@ -250,14 +257,14 @@ mod classes {
     /// and one byte under map to itself, one byte over maps to the next.
     #[test]
     fn class_for_round_trips() {
-        assert_eq!(class_for(0), 0);
-        assert_eq!(class_for(1), 0);
+        assert_eq!(class_for_size(0), Some(0));
+        assert_eq!(class_for_size(1), Some(0));
         for class in 0..CLASS_COUNT {
-            let bytes = class_bytes(class);
-            assert_eq!(class_for(bytes), class, "exact size of class {class}");
-            assert_eq!(class_for(bytes - 1), class, "one under class {class}");
+            let bytes = size_of_class(class).unwrap();
+            assert_eq!(class_for_size(bytes), Some(class), "exact size of class {class}");
+            assert_eq!(class_for_size(bytes - 1), Some(class), "one under class {class}");
             if class + 1 < CLASS_COUNT {
-                assert_eq!(class_for(bytes + 1), class + 1, "one over class {class}");
+                assert_eq!(class_for_size(bytes + 1), Some(class + 1), "one over class {class}");
             }
         }
     }    
@@ -281,7 +288,10 @@ mod allocation {
             for index in [0, 1, 7] {
                 let p = Page::new(class, index);
                 p.check_invariants();
-                assert_eq!(p.slot_hw as usize * Handle::BYTES, class_bytes(class) as usize);
+                assert_eq!(
+                    p.slot_hw as usize * Handle::BYTES, 
+                    size_of_class(class).unwrap() as usize
+                );
             }
         }
     }
@@ -292,13 +302,13 @@ mod allocation {
         let mut p = Page::new(0, 0);
         p.check_invariants();
 
-        for i in 0..PAGE_ENTRY_COUNT {
+        for i in 0..HeapLoc::ENTRY_COUNT {
             let result = p.alloc(None, HandleMap::Scan(0), idle(0))
                 .expect("page has free slots");
             p.check_invariants();
 
             assert_eq!(result.location, loc(0, i));
-            assert_eq!(p.capacity(), PAGE_ENTRY_COUNT_SZ);
+            assert_eq!(p.capacity(), HeapLoc::ENTRY_COUNT_SZ);
             assert!(!result.became_full);
             assert!(!result.was_dirtied);
         }
@@ -308,7 +318,7 @@ mod allocation {
         p.check_invariants();
 
         assert_eq!(result.location, loc(1, 0));
-        assert_eq!(p.capacity(), 2 * PAGE_ENTRY_COUNT_SZ);
+        assert_eq!(p.capacity(), 2 * HeapLoc::ENTRY_COUNT_SZ);
         assert!(!result.became_full);
         assert!(!result.was_dirtied);
     }
@@ -333,7 +343,7 @@ mod allocation {
         let info = p.alloc(None, HandleMap::Scan(0), idle(1))
             .expect("page has free slots");
         p.check_invariants();
-        assert_eq!(info.swept, Some(SweepInfo { freed: 2, became_not_full: false, became_empty: false }));
+        assert_eq!(info.swept, Some(PageSweepInfo { freed: 2, became_not_full: false, became_empty: false }));
         assert_eq!(info.location, loc(0, 2));
 
         let info = p.alloc(None, HandleMap::Scan(0), idle(1))
@@ -362,8 +372,8 @@ mod allocation {
                 .expect("page has free slots");
             p.check_invariants();
 
-            let slot  = (i as u32) & PAGE_ENTRY_MASK;
-            let chunk = (i >> PAGE_ENTRY_BITS) as u32;
+            let slot  = (i as u32) & HeapLoc::ENTRY_MASK;
+            let chunk = (i >> HeapLoc::ENTRY_BITS) as u32;
 
             assert_eq!(info.swept, None);
             assert_eq!(info.location, loc(chunk, slot));
@@ -375,7 +385,7 @@ mod allocation {
             .expect("page has free slots");
 
         assert_eq!(info.swept, None);
-        assert_eq!(info.location, loc(PAGE_ENTRY_COUNT - 1, PAGE_ENTRY_COUNT - 1));
+        assert_eq!(info.location, loc(HeapLoc::ENTRY_COUNT - 1, HeapLoc::ENTRY_COUNT - 1));
         assert!(!info.was_dirtied);
         assert!(info.became_full);
         assert!(p.is_full());
@@ -383,7 +393,7 @@ mod allocation {
         // A full page with nothing to sweep refuses further allocation
         let full = p.alloc(None, HandleMap::Scan(0), idle(0)).err();
         p.check_invariants();
-        assert_eq!(full, Some(AllocError::PageFull));
+        assert_eq!(full, Some(HeapAllocError::PageFull));
     }
 
     /// Initial bytes larger than the slot panic.
@@ -454,7 +464,7 @@ mod allocation {
         let mut p = page_with_stale_slot();
         let swept = p.sweep_to(2);
         p.check_invariants();
-        assert_eq!(swept, Some(SweepInfo::default()));
+        assert_eq!(swept, Some(PageSweepInfo::default()));
 
         let info = p.alloc(None, HandleMap::Scan(0), marking(3))
             .expect("page has free slots");
@@ -483,7 +493,7 @@ mod allocation {
         let info = p.alloc(None, HandleMap::Scan(0), idle(1))
             .expect("the catch-up sweep frees the page");
         p.check_invariants();
-        assert_eq!(info.swept, Some(SweepInfo {
+        assert_eq!(info.swept, Some(PageSweepInfo {
             freed: PAGE_SLOTS as u32,
             became_not_full: true,
             became_empty: true,
@@ -503,7 +513,7 @@ mod allocation {
         let info = p.alloc(None, HandleMap::Scan(0), idle(2))
             .expect("page has free slots");
         p.check_invariants();
-        assert_eq!(info.swept, Some(SweepInfo { freed: 3, became_not_full: false, became_empty: true }));
+        assert_eq!(info.swept, Some(PageSweepInfo { freed: 3, became_not_full: false, became_empty: true }));
         assert_eq!(info.location, locs[0]);
         assert_eq!(p.len(), 1);
         assert!(!p.is_occupied(locs[1]));
@@ -593,7 +603,7 @@ mod allocation {
         mark_all(&mut p, &locs[..10], marking(1));
         let swept = p.sweep_to(1);
         p.check_invariants();
-        assert_eq!(swept, Some(SweepInfo { freed: 60, became_not_full: false, became_empty: false }));
+        assert_eq!(swept, Some(PageSweepInfo { freed: 60, became_not_full: false, became_empty: false }));
         assert_eq!(p.len(), 10);
         assert_eq!(p.bytes_used(), 10 * 16);
         assert_eq!(p.capacity(), 128);
@@ -602,7 +612,7 @@ mod allocation {
         // Nothing marked for sweep 2, so the survivors go too
         let swept = p.sweep_to(2);
         p.check_invariants();
-        assert_eq!(swept, Some(SweepInfo { freed: 10, became_not_full: false, became_empty: true }));
+        assert_eq!(swept, Some(PageSweepInfo { freed: 10, became_not_full: false, became_empty: true }));
         assert!(p.is_empty());
         assert_eq!(p.bytes_used(), 0);
         assert_eq!(p.bytes_total(), 128 * 16);
@@ -612,23 +622,26 @@ mod allocation {
 mod access {
     use super::*;
 
-    /// Out-of-range, uncommitted and freed locations read as unoccupied
-    /// without panicking.
+    /// Uncommitted, never-allocated and freed locations read as
+    /// unoccupied without panicking.
     #[test]
     fn unoccupied_reads_as_none() {
         let mut p = Page::new(0, 0);
         let _ = alloc_n(&mut p, 1, idle(0));
 
         let probes = [
-            loc(0, 1), loc(1, 1), loc(0, PAGE_ENTRY_COUNT),
-            loc(PAGE_ENTRY_COUNT, 1), loc(u32::MAX, u32::MAX),
+            loc(0, 1), 
+            loc(1, 1), 
+            loc(0, HeapLoc::ENTRY_COUNT-1),
+            loc(HeapLoc::ENTRY_COUNT-1, 1), 
+            loc(HeapLoc::ENTRY_COUNT-1, HeapLoc::ENTRY_COUNT-1),
         ];
         assert!(p.get(loc(0, 0)).is_some());
         for probe in probes { assert!(p.get(probe).is_none(), "{probe:?}"); }
 
         let swept = p.sweep_to(1);
         p.check_invariants();
-        assert_eq!(swept, Some(SweepInfo { freed: 1, became_not_full: false, became_empty: true }));
+        assert_eq!(swept, Some(PageSweepInfo { freed: 1, became_not_full: false, became_empty: true }));
 
         assert!(p.get(loc(0, 0)).is_none());
         for probe in probes { assert!(p.get(probe).is_none(), "{probe:?}"); }
@@ -719,7 +732,7 @@ mod access {
     fn write_unoccupied() {
         let mut p = Page::new(0, 0);
         let mut location = alloc_n(&mut p, 1, idle(0))[0];
-        location.slot += 1;
+        location = location.with_slot(location.slot() + 1);
         let _ = p.write(location, 1, &[4, 3, 2], HandleMap::Scan(0), idle(0));
     }
 
@@ -1044,7 +1057,7 @@ mod drain {
         assert_eq!(drain_sorted(&mut p), raw(&[handle(1), handle(2), handle(3)]));
     }
 
-    /// After a drain, a second drain reports nothing and the the next
+    /// After a drain, a second drain reports nothing and the next
     /// write during marking returns true. Draining a clean page is a
     /// no-op.
     #[test]
@@ -1084,7 +1097,7 @@ mod sweep {
 
             let swept = p.sweep_to(idle(epoch).sweep_target());
             p.check_invariants();
-            assert_eq!(swept, Some(SweepInfo { freed: 2, became_not_full: false, became_empty: false }));
+            assert_eq!(swept, Some(PageSweepInfo { freed: 2, became_not_full: false, became_empty: false }));
             assert!(p.is_occupied(locs[0]) && p.is_occupied(locs[1]));
             assert!(!p.is_occupied(locs[2]) && !p.is_occupied(locs[3]));
             assert_eq!(p.marked_live, 0);
@@ -1122,7 +1135,7 @@ mod sweep {
 
         let swept = p.sweep_to(1);
         p.check_invariants();
-        assert_eq!(swept, Some(SweepInfo::default()));
+        assert_eq!(swept, Some(PageSweepInfo::default()));
         assert!(p.is_occupied(l));
         assert_eq!(p.marked_live, 0);
 
@@ -1168,7 +1181,7 @@ mod sweep {
 
         let swept = p.sweep_to(1);
         p.check_invariants();
-        assert_eq!(swept, Some(SweepInfo { freed: 2, became_not_full: false, became_empty: false }));
+        assert_eq!(swept, Some(PageSweepInfo { freed: 2, became_not_full: false, became_empty: false }));
         assert_eq!(p.sweep_index, 1);
         assert!(!p.is_occupied(locs[0]));
         assert!(p.is_occupied(locs[1]));
@@ -1186,7 +1199,7 @@ mod sweep {
 
         let swept = p.sweep_to(2);
         p.check_invariants();
-        assert_eq!(swept, Some(SweepInfo { freed: 70, became_not_full: false, became_empty: true }));
+        assert_eq!(swept, Some(PageSweepInfo { freed: 70, became_not_full: false, became_empty: true }));
         assert!(p.is_empty());
         assert_eq!(p.capacity(), 128);
         assert_eq!(p.sweep_index, 2);
@@ -1202,7 +1215,7 @@ mod sweep {
         let _ = alloc_n(&mut p, 1, idle(0));
         let swept = p.sweep_to(100);
         p.check_invariants();
-        assert_eq!(swept, Some(SweepInfo { freed: 1, became_not_full: false, became_empty: true }));
+        assert_eq!(swept, Some(PageSweepInfo { freed: 1, became_not_full: false, became_empty: true }));
         assert_eq!(p.sweep_index, 100);
     }
 
@@ -1224,21 +1237,21 @@ mod sweep {
 
         // Everything marked: no frees, no transitions
         mark_all(&mut p, &locs, marking(1));
-        assert_eq!(p.sweep_to(1), Some(SweepInfo { freed: 0, became_not_full: false, became_empty: false }));
+        assert_eq!(p.sweep_to(1), Some(PageSweepInfo { freed: 0, became_not_full: false, became_empty: false }));
         assert!(p.is_full());
 
         // One freed from a full page: not full, not empty
         mark_all(&mut p, &locs[1..], marking(2));
-        assert_eq!(p.sweep_to(2), Some(SweepInfo { freed: 1, became_not_full: true, became_empty: false }));
+        assert_eq!(p.sweep_to(2), Some(PageSweepInfo { freed: 1, became_not_full: true, became_empty: false }));
         p.check_invariants();
 
         // One more freed from a non-full page: no transition
         mark_all(&mut p, &locs[2..], marking(3));
-        assert_eq!(p.sweep_to(3), Some(SweepInfo { freed: 1, became_not_full: false, became_empty: false }));
+        assert_eq!(p.sweep_to(3), Some(PageSweepInfo { freed: 1, became_not_full: false, became_empty: false }));
         p.check_invariants();
 
         // Nothing marked: everything freed, became empty
-        assert_eq!(p.sweep_to(4), Some(SweepInfo {
+        assert_eq!(p.sweep_to(4), Some(PageSweepInfo {
             freed: PAGE_SLOTS as u32 - 2,
             became_not_full: false,
             became_empty: true,
@@ -1246,7 +1259,7 @@ mod sweep {
         p.check_invariants();
 
         // Sweeping an empty page is no transition
-        assert_eq!(p.sweep_to(5), Some(SweepInfo::default()));
+        assert_eq!(p.sweep_to(5), Some(PageSweepInfo::default()));
         p.check_invariants();
     }
 
@@ -1298,7 +1311,7 @@ mod sweep {
         let (marked, swept) = p.mark_live(locs[0], marking(2));
         p.check_invariants();
         assert!(marked);
-        assert_eq!(swept, Some(SweepInfo { freed: 1, became_not_full: false, became_empty: false }));
+        assert_eq!(swept, Some(PageSweepInfo { freed: 1, became_not_full: false, became_empty: false }));
         assert!(p.s_dirty.any());
 
         assert_eq!(drain_sorted(&mut p), raw(&[handle(7)]));
@@ -1387,7 +1400,7 @@ mod model {
 
         fn lowest_free(&self) -> Option<Key> {
             (0..PAGE_SLOTS as u32)
-                .map(|i| (i >> PAGE_ENTRY_BITS, i & PAGE_ENTRY_MASK))
+                .map(|i| (i >> HeapLoc::ENTRY_BITS, i & HeapLoc::ENTRY_MASK))
                 .find(|key| !self.objects.contains_key(key))
         }
 
@@ -1403,7 +1416,7 @@ mod model {
         }
 
         /// Mirrors `Page::sweep_to`, returning what the page should report.
-        fn sweep_to(&mut self, target: u64) -> Option<SweepInfo> {
+        fn sweep_to(&mut self, target: u64) -> Option<PageSweepInfo> {
             let gap = target - self.sweep_index;
             if gap == 0 { return None; }
 
@@ -1426,7 +1439,7 @@ mod model {
             }
             self.sweep_index = target;
 
-            Some(SweepInfo {
+            Some(PageSweepInfo {
                 freed: dead.len() as u32,
                 became_not_full: was_full && !self.is_full(),
                 became_empty: !was_empty && self.objects.is_empty(),
@@ -1498,7 +1511,7 @@ mod model {
     /// catch-up sweeps and resets all occur naturally.
     ///
     fn run(seed: u64, slot_size: u32, ops: usize) {
-        let slot_size_class = class_for(slot_size);
+        let slot_size_class = class_for_size(slot_size).unwrap();
         let slot_hw = slot_size / Handle::BYTES as u32;
         let mut rng = Rng(seed);
         let mut p = Page::new(slot_size_class, 0);
@@ -1521,7 +1534,7 @@ mod model {
 
                     let result = p.alloc(init, HandleMap::Scan(slot_hw), gc);
                     match expected {
-                        None => assert_eq!(result.err(), Some(AllocError::PageFull), "op {op}"),
+                        None => assert_eq!(result.err(), Some(HeapAllocError::PageFull), "op {op}"),
                         Some(key) => {
                             let info = result.expect("model says a slot is free");
                             assert_eq!(info.location, loc(key.0, key.1), "op {op}");

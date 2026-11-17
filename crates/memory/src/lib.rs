@@ -1,13 +1,14 @@
 // Oxygris | Copyright 2026 Natalie Baker | MIT / Apache License v2.0 //
+// Oxygris | Copyright 2026 Natalie Baker | MIT / Apache License v2.0 //
 
 //! Memory management for the Oxygris virtual machine: a size-class paged
 //! heap with an incremental, per-page garbage collector.
 //!
-//! Objects live in fixed-size slots on a [`heap::page::Page`]. A page
-//! holds up to 64 chunks of 64 slots, commits chunks lazily and in
-//! order, and always hands out its lowest free slot. Objects are
-//! addressed by a [`Handle`], a structured 64-bit word whose location
-//! bits name the page, chunk and slot.
+//! Objects live in fixed-size slots on a [`heap::Page`]. A page holds up
+//! to 64 chunks of 64 slots of a single size class, commits chunks lazily
+//! and in order, and always hands out its lowest free slot. Objects are
+//! addressed by a [`Handle`], a structured 64-bit word whose low 32 bits
+//! are a [`heap::HeapLoc`] naming the page, chunk and slot.
 //!
 //! Collection is an incremental mark and sweep. Each page carries its
 //! own sweep index, and its live mark is the parity of that index, so
@@ -25,30 +26,31 @@
 //!
 //! # Modules
 //!
-//! - [`bitmap`]: the 64-bit bitmap used for per-chunk slot state and
+//! - [`bitmap`]: the 64-bit bitmap behind per-chunk slot state and
 //!   per-page chunk summaries.
-//! - [`heap`]: the size-class table, the GC phase as a page sees it, and
-//!   the layout descriptions the write barrier uses to find handles.
-//! - [`heap::page`]: the page itself.
+//! - [`heap`]: pages, the locations that address them, and the
+//!   size-class table.
+//! - [`gc`]: the GC phase as a page sees it, and the handle layouts the
+//!   write barrier uses to find handles.
 //!
-//! The heap that owns pages, resolves handles to locations and drives
-//! the collector is not yet written.
+//! The page directory, which owns pages and resolves handles to them,
+//! and the collector that drives marking and sweeping are not yet
+//! written.
+
+#![allow(missing_docs)] 
 
 #![forbid(unsafe_code)]
 #![no_std]
 extern crate alloc;
 
 pub mod bitmap;
-
-// WIP
 pub mod heap;
+pub mod gc;
 
-
-// TODO finish handle impl
 /// A structured 64-bit reference word, laid out from the most
 /// significant bit as `kind(4) : reserved(4) : scan(4) : type(20) :
-/// location(32)`, where location is `page(20) : chunk(6) : slot(6)`.
-/// Handles and refs share this format and are told apart by `kind`.
+/// location(32)`, where location is a [`heap::HeapLoc`]. Handles and
+/// refs share this format and are told apart by `kind`.
 ///
 /// Kind 0 is null, and the all-zero word is `NONE`, so zeroed slot
 /// memory always reads as null.
